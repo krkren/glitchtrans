@@ -5,17 +5,15 @@
 //   GlitchTrans.apply(layer, %[seed: 3, strength: 80])   one glitched frame of a layer's own
 //                                                        picture, drawn over it
 //
-// Options (the transition's attributes, apply()'s dictionary), all but time optional:
+// Options (the transition's attributes, apply()'s dictionary), all but time optional (README.md):
 //   time      ms (the transition's; apply() draws the height of a glitch)
+//   style     mixed (default), digital, analog or mosh: which faults lead
 //   seed      a number: the same seed draws the same glitch (default: a new one each time)
 //   strength  0-100, how strong at its height (100)
-//   bands     how many bands the picture is cut into (18)
-//   shift     the most a band moves sideways, px (a twelfth of the width)
-//   split     the most the colours move apart, px (width / 96)
-//   noise     0-100, how many rows of static (30)
-//   blocks    displaced rectangles at the height (12)
-//   step      ms between the glitch's jumps (50); apply() takes `frame`, which jump to draw
-//   spread    0-100, how far apart (of the whole time) the stripes of the new picture arrive (60)
+//   bands, shift, split, noise, blocks, damage, jpeg, mosh, sort, analog, flash
+//             each fault's amount (by default the style's; glitch.h)
+//   step      about how many ms a jump of the glitch holds (50); apply() takes `frame`, which jump
+//   spread    0-100, how far apart (of the whole time) the parts of the new picture arrive (60)
 //
 // SPDX-License-Identifier: 0BSD
 
@@ -25,6 +23,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
@@ -46,6 +45,24 @@ bool optionInt(iTVPSimpleOptionProvider *options, const tjs_char *name, int &out
 	return true;
 }
 
+bool optionString(iTVPSimpleOptionProvider *options, const tjs_char *name, std::string &out) {
+	tTJSVariant v;
+	if (!options || TJS_FAILED(options->GetValue(name, &v)) || v.Type() != tvtString) return false;
+	ttstr s = v;
+	out.clear();
+	for (const tjs_char *c = s.c_str(); *c; c++) out += *c < 128 ? char(*c) : '?';
+	return true;
+}
+
+bool dictString(iTJSDispatch2 *dict, const tjs_char *name, std::string &out) {
+	tTJSVariant v;
+	if (!dict || TJS_FAILED(dict->PropGet(0, name, nullptr, &v, dict)) || v.Type() != tvtString) return false;
+	ttstr s = v;
+	out.clear();
+	for (const tjs_char *c = s.c_str(); *c; c++) out += *c < 128 ? char(*c) : '?';
+	return true;
+}
+
 bool dictInt(iTJSDispatch2 *dict, const tjs_char *name, int &out) {
 	tTJSVariant v;
 	if (!dict || TJS_FAILED(dict->PropGet(0, name, nullptr, &v, dict)) || v.Type() == tvtVoid) return false;
@@ -53,10 +70,12 @@ bool dictInt(iTJSDispatch2 *dict, const tjs_char *name, int &out) {
 	return true;
 }
 
-template <typename Get>
-glitch::Options readOptions(Get get) {
+template <typename Get, typename GetString>
+glitch::Options readOptions(Get get, GetString getString) {
 	glitch::Options o;
 	int v;
+	std::string style;
+	if (getString(TJS_W("style"), style)) o.style = glitch::styleNamed(style);
 	o.seed = get(TJS_W("seed"), v) ? uint32_t(v) : freshSeed();
 	if (get(TJS_W("strength"), v)) o.strength = v;
 	if (get(TJS_W("bands"), v)) o.bands = v;
@@ -64,6 +83,12 @@ glitch::Options readOptions(Get get) {
 	if (get(TJS_W("split"), v)) o.split = v;
 	if (get(TJS_W("noise"), v)) o.noise = v;
 	if (get(TJS_W("blocks"), v)) o.blocks = v;
+	if (get(TJS_W("damage"), v)) o.damage = v;
+	if (get(TJS_W("jpeg"), v)) o.jpeg = v;
+	if (get(TJS_W("mosh"), v)) o.mosh = v;
+	if (get(TJS_W("sort"), v)) o.sort = v;
+	if (get(TJS_W("analog"), v)) o.analog = v;
+	if (get(TJS_W("flash"), v)) o.flash = v;
 	if (get(TJS_W("step"), v)) o.step = v;
 	if (get(TJS_W("spread"), v)) o.spread = v;
 	return o;
@@ -82,6 +107,48 @@ bool picture(iTVPScanLineProvider *p, glitch::Picture &pic) {
 	pic.width = int(w);
 	pic.height = int(h);
 	return true;
+}
+
+// ------------------------------------------------------------------------
+// Drawing on the engine's draw threads (-drawthread): bands of rows at once
+// ------------------------------------------------------------------------
+
+struct DrawTask {
+	const glitch::Frame *frame;
+	const glitch::Picture *from, *to;
+	int left, top, w, h;
+	uint8_t *dest;
+	long destPitch;
+	int destLeft, destTop;
+};
+
+void TJS_USERENTRY drawTaskEntry(void *p) {
+	const DrawTask *t = static_cast<const DrawTask *>(p);
+	glitch::draw(*t->frame, *t->from, *t->to, t->left, t->top, t->w, t->h, t->dest, t->destPitch, t->destLeft,
+	             t->destTop);
+}
+
+void drawInParallel(const glitch::Frame &f, const glitch::Picture &from, const glitch::Picture &to, int left, int top,
+                    int w, int h, uint8_t *dest, long destPitch, int destLeft, int destTop) {
+	const int kMaxTasks = 16;
+	int tasks = 1;
+	if (long(w) * h >= 64 * 1024) {
+		tasks = int(TVPGetThreadNum());
+		tasks = tasks < 1 ? 1 : tasks > kMaxTasks ? kMaxTasks : tasks;
+		if (tasks > h / 8) tasks = h / 8 > 0 ? h / 8 : 1;
+	}
+	if (tasks <= 1) {
+		glitch::draw(f, from, to, left, top, w, h, dest, destPitch, destLeft, destTop);
+		return;
+	}
+	DrawTask params[kMaxTasks];
+	TVPBeginThreadTask(tasks);
+	for (int i = 0; i < tasks; i++) {
+		int y0 = h * i / tasks, y1 = h * (i + 1) / tasks;
+		params[i] = DrawTask{&f, &from, &to, left, top + y0, w, y1 - y0, dest, destPitch, destLeft, destTop + y0};
+		TVPExecThreadTask(&drawTaskEntry, TVP_THREAD_PARAM(&params[i]));
+	}
+	TVPEndThreadTask();
 }
 
 // ------------------------------------------------------------------------
@@ -134,8 +201,8 @@ public:
 			return TJS_E_FAIL;
 		if (from.width != width || from.height != height || to.width != width || to.height != height)
 			return TJS_E_FAIL;
-		glitch::draw(frame, from, to, data->Left, data->Top, data->Width, data->Height,
-		             static_cast<uint8_t *>(destLine), long(destPitch), data->DestLeft, data->DestTop);
+		drawInParallel(frame, from, to, data->Left, data->Top, data->Width, data->Height,
+		               static_cast<uint8_t *>(destLine), long(destPitch), data->DestLeft, data->DestTop);
 		return TJS_S_OK;
 	}
 
@@ -174,7 +241,8 @@ public:
 		int t = 0;
 		if (!optionInt(options, TJS_W("time"), t)) return TJS_E_FAIL; // a transition needs its time
 		if (t < 2) t = 2;
-		glitch::Options o = readOptions([&](const tjs_char *n, int &v) { return optionInt(options, n, v); });
+		glitch::Options o = readOptions([&](const tjs_char *n, int &v) { return optionInt(options, n, v); },
+		                                [&](const tjs_char *n, std::string &v) { return optionString(options, n, v); });
 		*handler = new GlitchHandler(o, uint64_t(t), int(src1w), int(src1h));
 		return TJS_S_OK;
 	}
@@ -198,7 +266,7 @@ bool getInt(iTJSDispatch2 *obj, const tjs_char *name, tjs_int64 &out) {
 
 class GlitchTrans {
 public:
-	static ttstr getVersion() { return TJS_W("1.0"); }
+	static ttstr getVersion() { return TJS_W("2.0"); }
 
 	// One glitched frame of a layer's own picture, drawn over it; false when it has none
 	static bool apply(tTJSVariant layer, tTJSVariant opts) {
@@ -212,7 +280,8 @@ public:
 		if (!getInt(obj, TJS_W("mainImageBufferForWrite"), buf) || buf == 0 ||
 		    !getInt(obj, TJS_W("mainImageBufferPitch"), pitch))
 			return false;
-		glitch::Options o = readOptions([&](const tjs_char *n, int &v) { return dictInt(dict, n, v); });
+		glitch::Options o = readOptions([&](const tjs_char *n, int &v) { return dictInt(dict, n, v); },
+		                                [&](const tjs_char *n, std::string &v) { return dictString(dict, n, v); });
 		int frameIndex = 0;
 		dictInt(dict, TJS_W("frame"), frameIndex);
 		uint8_t *px = reinterpret_cast<uint8_t *>(static_cast<intptr_t>(buf));
@@ -226,7 +295,7 @@ public:
 		src.height = int(h);
 		int step = o.step > 0 ? o.step : 50;
 		glitch::Frame f = glitch::makeFrame(o, int(w), int(h), uint64_t(frameIndex < 0 ? 0 : frameIndex) * uint64_t(step), 0);
-		glitch::draw(f, src, src, 0, 0, int(w), int(h), px, long(pitch), 0, 0);
+		drawInParallel(f, src, src, 0, 0, int(w), int(h), px, long(pitch), 0, 0);
 		// tell the engine the picture changed
 		tTJSVariant result;
 		obj->FuncCall(0, TJS_W("update"), nullptr, &result, 0, nullptr, obj);
