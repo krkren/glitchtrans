@@ -135,7 +135,7 @@ int main() {
 			}
 		CHECK(oneOrOther);
 
-		// a still glitch (time 0) is at full strength and keeps the alpha
+		// a still glitch (time 0) is at full strength; a picture of one alpha keeps it
 		Image alpha(W, H, 0);
 		for (uint32_t &c : alpha.px) c = (c & 0x00ffffffu) | 0x80000000u;
 		Frame still = makeFrame(o, W, H, 0, 0);
@@ -146,6 +146,31 @@ int main() {
 		CHECK(alphaKept);
 		if (st != Style::Mosh) CHECK(differ(sp, alpha.px) > 0);
 	}
+	// a layer coming in from nothing (its old picture transparent): pieces of the new picture show
+	// before their own place has arrived, with their alpha, and the rest stays transparent
+	{
+		Image empty(W, H, 0), layer(W, H, 0x00c08040u);
+		for (uint32_t &c : empty.px) c &= 0x00ffffffu;
+		Options o;
+		o.seed = 42;
+		o.style = Style::Digital;
+		o.damage = 100;
+		int early = 0, clear = 0;
+		for (uint64_t e = 300; e <= 600; e += 50) {
+			Frame f = makeFrame(o, W, H, e, T);
+			std::vector<uint32_t> p = render(f, empty, layer, 1);
+			for (int y = 0; y < H; y++)
+				for (int x = 0; x < W; x++) {
+					if (isNew(f, x, y)) continue;
+					uint32_t c = p[size_t(y) * W + x];
+					if ((c >> 24) == 0xff) early++;
+					else if ((c >> 24) == 0) clear++;
+				}
+		}
+		CHECK(early > 0);
+		CHECK(clear > early);
+	}
+
 	// each style its own
 	for (size_t i = 0; i < mids.size(); i++)
 		for (size_t j = i + 1; j < mids.size(); j++) CHECK(mids[i] != mids[j]);

@@ -100,7 +100,10 @@ picks which jump to draw) and draws the height of a glitch over the layer's own 
 when the layer has none.
 
 The transition is an exchange transition, as `crossfade` is, and both pictures must be the same
-size. It keeps each pixel's alpha. It draws on the engine's draw threads (`-drawthread`), bands of
+size. A piece of the picture moved by a fault takes its alpha with it, so a layer that glitches in
+or out on its own (a character, a CG over the scene) breaks up with its shape, its pieces showing
+over what's behind it; on a whole screen the pictures are opaque anyway. It draws on the engine's
+draw threads (`-drawthread`), bands of
 rows at once.
 
 ## References
@@ -134,7 +137,8 @@ cmake -B build -DKRKRZ_DEV_DIR=/path/to/krkrz_dev && cmake --build build && ctes
 `glitch.cpp` has no engine in it; `tests/glitch_test.cpp` checks, for every style, that the first
 and last frames are the pictures as they are, that a seed and a moment always draw the same
 picture (whole or in the engine's pieces), that the new picture has arrived everywhere by the end,
-that strength 0 is a cut and that the alpha is kept; that the jumping faults hold within a step
+that strength 0 is a cut, that the alpha goes with the pieces (a layer coming in from nothing shows
+pieces of itself early); that the jumping faults hold within a step
 and jump at the next while a datamosh moves on, that the styles differ and that each fault can be
 turned off.
 

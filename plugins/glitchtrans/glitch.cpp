@@ -778,7 +778,6 @@ void drawRow(const Frame &f, const Picture &from, const Picture &to, int y, int 
 		const bool colour = rowColour || driftDX || moshing || rectEffect >= 0 || shuf || crushed || dcR || dcG ||
 		                    dcB || acAmp;
 		const uint32_t *srow = reinterpret_cast<const uint32_t *>(src.pixels + src.pitch * sy);
-		const uint32_t *hrow = reinterpret_cast<const uint32_t *>(home.pixels + home.pitch * y);
 		const uint32_t *trow0 = reinterpret_cast<const uint32_t *>(to.pixels + to.pitch * sy);
 		const uint32_t *trow1 = reinterpret_cast<const uint32_t *>(to.pixels + to.pitch * std::min(sy + 1, H - 1));
 		const int kr = mix * 3 / 2, mixIn = mix * mix * 77 / 65025;
@@ -791,10 +790,8 @@ void drawRow(const Frame &f, const Picture &from, const Picture &to, int y, int 
 				int sx = wrapNear(x + dx, W);
 				int n = std::min(b - x, W - sx);
 				uint32_t *o = out + (x - x0);
-				const uint32_t *sp = srow + sx, *hp = hrow + x;
-				if (sp == hp) std::copy(sp, sp + n, o);
-				else
-					for (int i = 0; i < n; i++) o[i] = (hp[i] & 0xff000000u) | (sp[i] & 0x00ffffffu);
+				const uint32_t *sp = srow + sx;
+				std::copy(sp, sp + n, o); // alpha and all: a piece of a layer moves with its shape
 				x += n;
 			}
 			a = b;
@@ -809,7 +806,7 @@ void drawRow(const Frame &f, const Picture &from, const Picture &to, int y, int 
 			if (smear) sx += clampi(x + ox, smearX0, smearX1) - x;
 			sx = wrapNear(sx, W);
 			uint32_t c = srow[sx];
-			const uint32_t alpha = hrow[x] & 0xff000000u;
+			const uint32_t alpha = c & 0xff000000u; // the piece's own: its shape moves with it
 			if (!colour) {
 				out[x - x0] = alpha | (c & 0x00ffffffu);
 				continue;
@@ -872,18 +869,18 @@ void drawRow(const Frame &f, const Picture &from, const Picture &to, int y, int 
 void sortRow(const Frame::SortBand &sb, uint32_t *row, int w) {
 	std::vector<std::pair<int, uint32_t>> run;
 	int x = 0;
+	// a pixel takes part when it's in the range and mostly opaque (a layer's empty parts don't)
+	auto in = [&](uint32_t c) {
+		int l = luma(c);
+		return l >= sb.lo && l < sb.hi && (c >> 24) >= 0x80;
+	};
 	while (x < w) {
-		int l = luma(row[x]);
-		if (l < sb.lo || l >= sb.hi) {
+		if (!in(row[x])) {
 			x++;
 			continue;
 		}
 		int start = x;
-		while (x < w) {
-			int v = luma(row[x]);
-			if (v < sb.lo || v >= sb.hi) break;
-			x++;
-		}
+		while (x < w && in(row[x])) x++;
 		if (x - start < 3) continue;
 		run.clear();
 		for (int i = start; i < x; i++) run.emplace_back(luma(row[i]), row[i]);
@@ -891,8 +888,7 @@ void sortRow(const Frame::SortBand &sb, uint32_t *row, int w) {
 			std::stable_sort(run.begin(), run.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
 		else
 			std::stable_sort(run.begin(), run.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
-		// the alpha stays where it was
-		for (int i = start; i < x; i++) row[i] = (row[i] & 0xff000000u) | (run[size_t(i - start)].second & 0x00ffffffu);
+		for (int i = start; i < x; i++) row[i] = run[size_t(i - start)].second;
 	}
 }
 
